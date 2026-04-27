@@ -28,8 +28,9 @@ let settings = {
 let playerState = {
   playing: false,
   index: 0,
-  phase: 'idle',  // idle | english | pause | spanish | done
+  phase: 'idle',      // idle | english | pause | spanish | done
   playOrder: [],
+  generation: 0,      // incremented on skip/stop so in-flight playWord exits early
 };
 
 let flashState = {
@@ -40,8 +41,6 @@ let flashState = {
   deck: [],
 };
 
-let synthQueue = [];
-let synthBusy = false;
 let keepAliveInterval = null;
 let deferTimer = null;
 
@@ -62,6 +61,63 @@ function load() {
   }
 }
 
+// ── Silent audio — keeps Android audio session alive ───────────────────────
+// Generates a real WAV blob rather than relying on a fragile data URI.
+let silentAudio = null;
+
+function makeSilentWavUrl(durationSeconds = 3, sampleRate = 8000) {
+  const numSamples = sampleRate * durationSeconds;
+  const buf = new ArrayBuffer(44 + numSamples);
+  const v = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+
+  str(0,  'RIFF');  v.setUint32(4,  36 + numSamples, true);
+  str(8,  'WAVE');
+  str(12, 'fmt ');  v.setUint32(16, 16,         true);
+                    v.setUint16(20, 1,           true); // PCM
+                    v.setUint16(22, 1,           true); // mono
+                    v.setUint32(24, sampleRate,  true);
+                    v.setUint32(28, sampleRate,  true); // byte rate
+                    v.setUint16(32, 1,           true); // block align
+                    v.setUint16(34, 8,           true); // 8-bit
+  str(36, 'data');  v.setUint32(40, numSamples,  true);
+  // 8-bit PCM silence = 128 (unsigned midpoint), not 0
+  for (let i = 44; i < 44 + numSamples; i++) v.setUint8(i, 128);
+
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+function ensureSilentAudio() {
+  if (silentAudio) return;
+  silentAudio = new Audio(makeSilentWavUrl());
+  silentAudio.loop = true;
+  silentAudio.volume = 0.001; // near-zero but non-zero keeps the session truly alive
+}
+
+function startKeepAlive() {
+  ensureSilentAudio();
+  silentAudio.play().catch(() => {});
+
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(() => {
+    // Chrome Android suspends speechSynthesis in the background after ~15 s.
+    // Calling resume() periodically prevents that.
+    if (speechSynthesis.paused || speechSynthesis.pending) {
+      speechSynthesis.resume();
+    }
+    // Ping service worker to keep it alive
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      const chan = new MessageChannel();
+      navigator.serviceWorker.controller.postMessage({ type: 'KEEP_ALIVE' }, [chan.port2]);
+    }
+  }, 10000);
+}
+
+function stopKeepAlive() {
+  if (silentAudio) silentAudio.pause();
+  if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
+}
+
 // ── TTS helpers ────────────────────────────────────────────────────────────
 let voices = [];
 
@@ -71,37 +127,38 @@ function loadVoices() {
 
 function pickVoice(lang) {
   if (!voices.length) loadVoices();
-  return voices.find(v => v.lang.startsWith(lang) && !v.name.includes('Google') === false) ||
+  // Prefer non-Google voices on Android — they are the on-device voices
+  // and continue to work when the screen is locked. Google voices require
+  // a network round-trip that Android blocks in the background.
+  return voices.find(v => v.lang.startsWith(lang) && !v.name.includes('Google')) ||
     voices.find(v => v.lang.startsWith(lang)) ||
     null;
 }
 
-function speak(text, lang, rate = settings.rate) {
+function speak(text, lang) {
   return new Promise(resolve => {
-    // Cancel any pending speech
-    speechSynthesis.cancel();
-
     const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = lang === 'en' ? 'en-US' : 'es-ES';
-    utter.rate = rate;
+    utter.lang  = lang === 'en' ? 'en-US' : 'es-ES';
+    utter.rate  = settings.rate;
     utter.pitch = 1;
     utter.volume = 1;
 
     const voice = lang === 'en'
       ? (settings.enVoice ? voices.find(v => v.name === settings.enVoice) : null) || pickVoice('en')
       : (settings.esVoice ? voices.find(v => v.name === settings.esVoice) : null) || pickVoice('es');
-
     if (voice) utter.voice = voice;
 
-    utter.onend = () => resolve();
-    utter.onerror = () => resolve();
+    // Watchdog: Chrome mobile sometimes fires neither onend nor onerror
+    const wordCount = text.trim().split(/\s+/).length;
+    const watchdogMs = Math.ceil(wordCount * 700 / settings.rate) + 3000;
+    const watchdog = setTimeout(() => resolve(), watchdogMs);
 
-    // Chrome mobile bug: synthesis stops if utterance is > ~15 words
-    // Re-queue if synthesis gets stuck
-    let watchdog = setTimeout(() => resolve(), (text.split(' ').length * 600 / rate) + 2000);
-    utter.onend = () => { clearTimeout(watchdog); resolve(); };
+    utter.onend   = () => { clearTimeout(watchdog); resolve(); };
+    // 'interrupted' = we cancelled it intentionally (skip/stop) — still resolve
     utter.onerror = () => { clearTimeout(watchdog); resolve(); };
 
+    // Resume in case Android paused synthesis while backgrounded
+    if (speechSynthesis.paused) speechSynthesis.resume();
     speechSynthesis.speak(utter);
   });
 }
@@ -111,34 +168,36 @@ function delay(ms) {
 }
 
 // ── Paul Noble playback engine ─────────────────────────────────────────────
-async function playWord(wordObj) {
-  if (!playerState.playing) return;
+// `gen` is a snapshot of playerState.generation at the moment playWord was
+// called. If it changes (skip/stop), we bail out immediately after each await.
+async function playWord(wordObj, gen) {
+  const bail = () => playerState.generation !== gen || !playerState.playing;
 
   const { en, es } = wordObj;
 
-  // Phase: speak English
+  // English
   playerState.phase = 'english';
   updatePlayerUI();
   showSpanish(false);
   await speak(en, 'en');
-  if (!playerState.playing) return;
+  if (bail()) return;
 
-  // Phase: pause
+  // Pause
   playerState.phase = 'pause';
   updatePlayerUI();
   await delay(settings.pauseMs);
-  if (!playerState.playing) return;
+  if (bail()) return;
 
-  // Phase: speak Spanish (repeat N times)
+  // Spanish × N
   playerState.phase = 'spanish';
   showSpanish(true);
   updatePlayerUI();
   for (let i = 0; i < settings.repeatSpanish; i++) {
     await speak(es, 'es');
-    if (!playerState.playing) return;
+    if (bail()) return;
     if (i < settings.repeatSpanish - 1) {
       await delay(600);
-      if (!playerState.playing) return;
+      if (bail()) return;
     }
   }
 
@@ -150,10 +209,9 @@ async function playWord(wordObj) {
 async function runPlayback() {
   if (!words.length) { stopPlayback(); return; }
 
-  buildPlayOrder();
-
   while (playerState.playing) {
     const idx = playerState.playOrder[playerState.index];
+
     if (idx === undefined) {
       if (settings.autoLoop) {
         playerState.index = 0;
@@ -165,10 +223,18 @@ async function runPlayback() {
       }
     }
 
+    const gen = playerState.generation;
     highlightWord(idx);
-    await playWord(words[idx]);
+    updateMediaSessionMeta(words[idx]);
+    await playWord(words[idx], gen);
+
     if (!playerState.playing) break;
-    playerState.index++;
+
+    // If a skip happened, generation changed — don't auto-advance;
+    // the skip function already set the correct index.
+    if (playerState.generation === gen) {
+      playerState.index++;
+    }
   }
 }
 
@@ -186,8 +252,10 @@ function buildPlayOrder() {
 function startPlayback(fromIndex = null) {
   if (!words.length) { toast('Add some words first!'); return; }
 
+  // Cancel any in-flight speech first, then bump generation so playWord exits
   speechSynthesis.cancel();
   if (deferTimer) clearTimeout(deferTimer);
+  playerState.generation++;
 
   playerState.playing = true;
   if (fromIndex !== null) playerState.index = fromIndex;
@@ -200,11 +268,13 @@ function startPlayback(fromIndex = null) {
 }
 
 function stopPlayback() {
+  playerState.generation++;   // causes any in-flight playWord to bail
   playerState.playing = false;
   playerState.phase = 'idle';
   speechSynthesis.cancel();
   if (deferTimer) clearTimeout(deferTimer);
   stopKeepAlive();
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
   updatePlayPauseBtn();
   updatePlayerUI();
   showSpanish(false);
@@ -213,103 +283,72 @@ function stopPlayback() {
 
 function skipNext() {
   if (!playerState.playing) return;
+  playerState.generation++;   // playWord will bail after its current await
+  playerState.index++;
   speechSynthesis.cancel();
   if (deferTimer) clearTimeout(deferTimer);
-  playerState.index++;
-  playerState.phase = 'idle';
+  // runPlayback sees generation changed, skips auto-advance, loops to new index
 }
 
 function skipPrev() {
   if (!playerState.playing) return;
+  playerState.generation++;
+  playerState.index = Math.max(0, playerState.index - 1);
   speechSynthesis.cancel();
   if (deferTimer) clearTimeout(deferTimer);
-  playerState.index = Math.max(0, playerState.index - 1);
-  playerState.phase = 'idle';
 }
 
 // ── Media Session API ──────────────────────────────────────────────────────
 function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
 
-  const current = () => {
-    const idx = playerState.playOrder[playerState.index];
-    return idx !== undefined ? words[idx] : null;
-  };
-
-  const updateMeta = () => {
-    const w = current();
-    if (!w) return;
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: w.en,
-      artist: w.es,
-      album: 'Mi Vocabulario',
-      artwork: [
-        { src: './icons/icon-192.png', sizes: '192x192', type: 'image/png' },
-        { src: './icons/icon-512.png', sizes: '512x512', type: 'image/png' },
-      ]
-    });
-  };
-
-  navigator.mediaSession.setActionHandler('play', () => {
-    if (!playerState.playing) startPlayback();
-  });
-  navigator.mediaSession.setActionHandler('pause', () => stopPlayback());
-  navigator.mediaSession.setActionHandler('nexttrack', skipNext);
-  navigator.mediaSession.setActionHandler('previoustrack', skipPrev);
-  navigator.mediaSession.setActionHandler('stop', stopPlayback);
+  navigator.mediaSession.setActionHandler('play',          () => { if (!playerState.playing) startPlayback(); });
+  navigator.mediaSession.setActionHandler('pause',         () => stopPlayback());
+  navigator.mediaSession.setActionHandler('stop',          () => stopPlayback());
+  navigator.mediaSession.setActionHandler('nexttrack',     () => skipNext());
+  navigator.mediaSession.setActionHandler('previoustrack', () => skipPrev());
 
   navigator.mediaSession.playbackState = 'playing';
-  updateMeta();
 }
 
-// Silent audio trick: keeps media session alive on Android lock screen
-let silentAudio = null;
-function ensureSilentAudio() {
-  if (silentAudio) return;
-  // 1-second silent MP3 as data URI (44-byte minimal MP3)
-  const silentDataUri = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAABAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA//MUYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-  silentAudio = new Audio(silentDataUri);
-  silentAudio.loop = true;
+function updateMediaSessionMeta(word) {
+  if (!('mediaSession' in navigator) || !word) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  word.en,
+    artist: word.es,
+    album:  'Mi Vocabulario',
+    artwork: [
+      { src: './icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: './icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+    ]
+  });
+  navigator.mediaSession.playbackState = 'playing';
 }
 
-function startKeepAlive() {
-  ensureSilentAudio();
-  silentAudio.play().catch(() => {});
-  // Also ping service worker
-  if (keepAliveInterval) clearInterval(keepAliveInterval);
-  keepAliveInterval = setInterval(() => {
-    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
-      const chan = new MessageChannel();
-      navigator.serviceWorker.controller.postMessage({ type: 'KEEP_ALIVE' }, [chan.port2]);
-    }
-  }, 25000);
-}
-
-function stopKeepAlive() {
-  if (silentAudio) silentAudio.pause();
-  if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
-}
+// Resume synthesis if the app returns to the foreground after being backgrounded
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && playerState.playing) {
+    if (speechSynthesis.paused) speechSynthesis.resume();
+  }
+});
 
 // ── UI Updates ─────────────────────────────────────────────────────────────
 function updatePlayerUI() {
-  const idx = playerState.playOrder[playerState.index];
+  const idx  = playerState.playOrder[playerState.index];
   const word = idx !== undefined ? words[idx] : null;
 
   document.getElementById('player-english').textContent = word ? word.en : '—';
   document.getElementById('player-spanish').textContent = word ? word.es : '—';
 
   const total = words.length;
-  const pos = playerState.index + 1;
+  const pos   = playerState.index + 1;
   document.getElementById('progress-text').textContent =
     total ? `${Math.min(pos, total)} / ${total}` : '0 / 0';
   document.getElementById('progress-fill').style.width =
     total ? `${(Math.min(pos, total) / total) * 100}%` : '0%';
 
-  const phaseLabels = {
-    idle: '', english: 'Speaking English…', pause: 'Pause…',
-    spanish: 'Speaking Spanish…', done: ''
-  };
-  document.getElementById('phase-label').textContent = phaseLabels[playerState.phase] || '';
+  const labels = { idle: '', english: 'Speaking English…', pause: 'Pause…', spanish: 'Speaking Spanish…', done: '' };
+  document.getElementById('phase-label').textContent = labels[playerState.phase] || '';
 }
 
 function showSpanish(show) {
@@ -362,18 +401,17 @@ function buildDeck() {
 function renderFlashcard() {
   if (!flashState.deck.length) {
     document.getElementById('fc-front').textContent = 'Add words first';
-    document.getElementById('fc-back').textContent = '';
+    document.getElementById('fc-back').textContent  = '';
     document.getElementById('fc-stats').textContent = '';
     return;
   }
-
   const w = flashState.deck[flashState.index];
   document.getElementById('fc-front').textContent = w ? w.en : '—';
-  document.getElementById('fc-back').textContent = w ? w.es : '—';
+  document.getElementById('fc-back').textContent  = w ? w.es : '—';
   document.getElementById('fc-back').classList.toggle('show', flashState.revealed);
 
   const total = flashState.correct + flashState.incorrect;
-  const pct = total ? Math.round((flashState.correct / total) * 100) : 0;
+  const pct   = total ? Math.round((flashState.correct / total) * 100) : 0;
   document.getElementById('fc-stats').textContent =
     total ? `✓ ${flashState.correct}  ✗ ${flashState.incorrect}  (${pct}% correct)` : '';
   document.getElementById('fc-pos').textContent =
@@ -417,10 +455,10 @@ function populateVoiceSelects() {
 
 // ── Import / Export ────────────────────────────────────────────────────────
 function exportWords() {
-  const txt = words.map(w => `${w.en}\t${w.es}`).join('\n');
+  const txt  = words.map(w => `${w.en}\t${w.es}`).join('\n');
   const blob = new Blob([txt], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
   a.download = 'vocabulario.txt';
   a.click();
 }
@@ -443,8 +481,7 @@ function doImport() {
   txt.split('\n').forEach(line => {
     const parts = line.split('\t');
     if (parts.length >= 2) {
-      const en = parts[0].trim();
-      const es = parts[1].trim();
+      const en = parts[0].trim(), es = parts[1].trim();
       if (en && es && !words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
         words.push({ en, es });
         added++;
@@ -484,12 +521,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p =>
     p.classList.toggle('active', p.id === `tab-${name}`));
 
-  if (name === 'flashcard') {
-    if (!flashState.deck.length) buildDeck();
-    renderFlashcard();
-  }
-  if (name === 'settings') populateVoiceSelects();
-  if (name === 'words') renderWordList();
+  if (name === 'flashcard') { if (!flashState.deck.length) buildDeck(); renderFlashcard(); }
+  if (name === 'settings')  populateVoiceSelects();
+  if (name === 'words')     renderWordList();
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
@@ -502,28 +536,28 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2500);
 }
 
-// ── Settings apply ─────────────────────────────────────────────────────────
+// ── Settings ───────────────────────────────────────────────────────────────
 function applySettings() {
-  settings.pauseMs = parseInt(document.getElementById('set-pause').value, 10) || 1500;
+  settings.pauseMs       = parseInt(document.getElementById('set-pause').value,  10) || 1500;
   settings.repeatSpanish = parseInt(document.getElementById('set-repeat').value, 10) || 2;
-  settings.autoLoop = document.getElementById('set-loop').checked;
+  settings.autoLoop      = document.getElementById('set-loop').checked;
   settings.shufflePlayback = document.getElementById('set-shuffle').checked;
-  settings.enVoice = document.getElementById('sel-en-voice').value;
-  settings.esVoice = document.getElementById('sel-es-voice').value;
+  settings.enVoice       = document.getElementById('sel-en-voice').value;
+  settings.esVoice       = document.getElementById('sel-es-voice').value;
   save();
   toast('Settings saved');
 }
 
 function syncSettingsToUI() {
-  document.getElementById('set-pause').value = settings.pauseMs;
-  document.getElementById('set-repeat').value = settings.repeatSpanish;
-  document.getElementById('set-loop').checked = settings.autoLoop;
+  document.getElementById('set-pause').value   = settings.pauseMs;
+  document.getElementById('set-repeat').value  = settings.repeatSpanish;
+  document.getElementById('set-loop').checked  = settings.autoLoop;
   document.getElementById('set-shuffle').checked = settings.shufflePlayback;
-  document.getElementById('set-speed').value = settings.rate;
+  document.getElementById('set-speed').value   = settings.rate;
   document.getElementById('speed-display').textContent = settings.rate.toFixed(1) + '×';
 }
 
-// ── Event wiring ───────────────────────────────────────────────────────────
+// ── Init ───────────────────────────────────────────────────────────────────
 function init() {
   load();
   renderWordList();
@@ -531,21 +565,16 @@ function init() {
   updatePlayerUI();
   syncSettingsToUI();
 
-  // Voices may load async
   if (speechSynthesis.onvoiceschanged !== undefined) {
-    speechSynthesis.onvoiceschanged = () => {
-      loadVoices();
-      populateVoiceSelects();
-    };
+    speechSynthesis.onvoiceschanged = () => { loadVoices(); populateVoiceSelects(); };
   }
   loadVoices();
 
   // Tab bar
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-  });
+  document.querySelectorAll('.tab-btn').forEach(btn =>
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
 
-  // Player controls
+  // Player
   document.getElementById('btn-play').addEventListener('click', () => {
     if (playerState.playing) stopPlayback();
     else startPlayback(playerState.index);
@@ -553,14 +582,14 @@ function init() {
   document.getElementById('btn-prev').addEventListener('click', skipPrev);
   document.getElementById('btn-next').addEventListener('click', skipNext);
 
-  // Speed slider
+  // Speed
   document.getElementById('set-speed').addEventListener('input', e => {
     settings.rate = parseFloat(e.target.value);
     document.getElementById('speed-display').textContent = settings.rate.toFixed(1) + '×';
     save();
   });
 
-  // Loop toggle on player tab
+  // Player-tab loop toggle
   document.getElementById('player-loop').addEventListener('change', e => {
     settings.autoLoop = e.target.checked;
     save();
@@ -570,28 +599,16 @@ function init() {
   document.getElementById('btn-add-word').addEventListener('click', () => {
     const enEl = document.getElementById('inp-en');
     const esEl = document.getElementById('inp-es');
-    const en = enEl.value.trim();
-    const es = esEl.value.trim();
+    const en = enEl.value.trim(), es = esEl.value.trim();
     if (!en || !es) { toast('Enter both English and Spanish'); return; }
-    if (words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
-      toast('Word already exists'); return;
-    }
+    if (words.find(w => w.en.toLowerCase() === en.toLowerCase())) { toast('Word already exists'); return; }
     words.push({ en, es });
-    save();
-    renderWordList();
-    buildDeck();
-    enEl.value = '';
-    esEl.value = '';
-    enEl.focus();
+    save(); renderWordList(); buildDeck();
+    enEl.value = ''; esEl.value = ''; enEl.focus();
     toast(`Added: ${en} → ${es}`);
   });
-
-  document.getElementById('inp-es').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('btn-add-word').click();
-  });
-  document.getElementById('inp-en').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('inp-es').focus();
-  });
+  document.getElementById('inp-en').addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('inp-es').focus(); });
+  document.getElementById('inp-es').addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('btn-add-word').click(); });
 
   document.getElementById('word-list').addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
@@ -599,12 +616,8 @@ function init() {
       const i = parseInt(del.dataset.del, 10);
       if (confirm(`Delete "${words[i].en}"?`)) {
         words.splice(i, 1);
-        save();
-        renderWordList();
-        buildDeck();
-        if (playerState.playing && playerState.index >= words.length) {
-          playerState.index = 0;
-        }
+        save(); renderWordList(); buildDeck();
+        if (playerState.playing && playerState.index >= words.length) playerState.index = 0;
       }
       return;
     }
@@ -612,7 +625,6 @@ function init() {
     if (item) {
       const i = parseInt(item.dataset.idx, 10);
       stopPlayback();
-      playerState.index = i;
       switchTab('player');
       startPlayback(i);
     }
@@ -625,39 +637,25 @@ function init() {
   document.getElementById('btn-import-do').addEventListener('click', doImport);
   document.getElementById('btn-clear-all').addEventListener('click', () => {
     if (confirm('Delete ALL words? This cannot be undone.')) {
-      words = [];
-      save();
-      renderWordList();
-      buildDeck();
-      stopPlayback();
-      toast('Word bank cleared');
+      words = []; save(); renderWordList(); buildDeck(); stopPlayback(); toast('Word bank cleared');
     }
   });
 
   // Flashcard
-  document.getElementById('flashcard').addEventListener('click', () => {
-    if (!flashState.revealed) fcReveal();
-  });
+  document.getElementById('flashcard').addEventListener('click', () => { if (!flashState.revealed) fcReveal(); });
   document.getElementById('btn-fc-wrong').addEventListener('click', () => fcAnswer(false));
   document.getElementById('btn-fc-right').addEventListener('click', () => fcAnswer(true));
   document.getElementById('btn-fc-speak').addEventListener('click', () => {
     const w = flashState.deck[flashState.index];
-    if (w) { speak(w.en, 'en').then(() => delay(400)).then(() => speak(w.es, 'es')); }
+    if (w) speak(w.en, 'en').then(() => delay(400)).then(() => speak(w.es, 'es'));
   });
-  document.getElementById('btn-fc-shuffle').addEventListener('click', () => {
-    buildDeck();
-    renderFlashcard();
-    toast('Deck reshuffled');
-  });
+  document.getElementById('btn-fc-shuffle').addEventListener('click', () => { buildDeck(); renderFlashcard(); toast('Deck reshuffled'); });
 
   // Settings
   document.getElementById('btn-save-settings').addEventListener('click', applySettings);
   document.getElementById('install-btn').addEventListener('click', triggerInstall);
-
-  // Add load event for settings tab auto-save on change for toggles
-  ['set-loop', 'set-shuffle'].forEach(id => {
-    document.getElementById(id).addEventListener('change', applySettings);
-  });
+  ['set-loop', 'set-shuffle'].forEach(id =>
+    document.getElementById(id).addEventListener('change', applySettings));
 
   // Service worker
   if ('serviceWorker' in navigator) {
