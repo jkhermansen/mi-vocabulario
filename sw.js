@@ -1,6 +1,5 @@
-const CACHE_NAME = 'mi-vocabulario-v1';
+const CACHE_NAME = 'mi-vocabulario-v2';
 const ASSETS = [
-  './',
   './index.html',
   './app.js',
   './styles.css',
@@ -26,12 +25,13 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
+  // Only handle GET requests for same-origin assets
+  if (e.request.method !== 'GET') return;
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
   );
 });
 
-// Keep service worker alive during audio playback
 self.addEventListener('message', e => {
   if (e.data && e.data.type === 'KEEP_ALIVE') {
     e.ports[0].postMessage({ type: 'ALIVE' });
