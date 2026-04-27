@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#16213e" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Vocabulario" />
+  <title>Mi Vocabulario</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<header>
+  <h1>Mi Vocabulario</h1>
+  <span id="header-status" style="font-size:0.75rem;color:var(--text-muted)"></span>
+</header>
+
+<nav class="tab-bar">
+  <button class="tab-btn active" data-tab="player">▶ Player</button>
+  <button class="tab-btn" data-tab="flashcard">🃏 Cards</button>
+  <button class="tab-btn" data-tab="words">📚 Words</button>
+  <button class="tab-btn" data-tab="settings">⚙ Settings</button>
+</nav>
+
+<!-- ── PLAYER TAB ── -->
+<section id="tab-player" class="tab-panel active">
+
+  <div class="word-display">
+    <span class="label">English</span>
+    <div class="english" id="player-english">—</div>
+    <div class="spanish" id="player-spanish">—</div>
+  </div>
+
+  <div class="phase-indicator" id="phase-label"></div>
+
+  <div class="progress-bar-wrap">
+    <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+  </div>
+
+  <div class="progress-info">
+    <span id="progress-text">0 / 0</span>
+  </div>
+
+  <div class="controls">
+    <button class="ctrl-btn sm" id="btn-prev" title="Previous">⏮</button>
+    <button class="ctrl-btn lg" id="btn-play" title="Play / Pause">▶</button>
+    <button class="ctrl-btn sm" id="btn-next" title="Next">⏭</button>
+  </div>
+
+  <div class="speed-control">
+    <label for="set-speed">Speed</label>
+    <input type="range" id="set-speed" min="0.5" max="2.0" step="0.1" value="1.0" />
+    <span class="speed-val" id="speed-display">1.0×</span>
+  </div>
+
+  <label class="loop-toggle">
+    <input type="checkbox" id="player-loop" checked />
+    Loop playlist
+  </label>
+
+</section>
+
+<!-- ── FLASHCARD TAB ── -->
+<section id="tab-flashcard" class="tab-panel">
+
+  <div style="display:flex;justify-content:space-between;align-items:center;width:100%;max-width:360px">
+    <span id="fc-pos" style="font-size:0.8rem;color:var(--text-muted)"></span>
+    <button id="btn-fc-shuffle" class="wb-btn">Shuffle</button>
+  </div>
+
+  <div class="flashcard" id="flashcard">
+    <span class="fc-hint">English — tap to reveal</span>
+    <div class="fc-word" id="fc-front">—</div>
+    <div class="fc-answer" id="fc-back"></div>
+  </div>
+
+  <div class="fc-actions">
+    <button class="fc-btn wrong" id="btn-fc-wrong">✗ Again</button>
+    <button class="fc-btn speak-btn" id="btn-fc-speak">🔊</button>
+    <button class="fc-btn right" id="btn-fc-right">✓ Got it</button>
+  </div>
+
+  <div class="fc-stats" id="fc-stats"></div>
+
+</section>
+
+<!-- ── WORD BANK TAB ── -->
+<section id="tab-words" class="tab-panel">
+
+  <div class="word-add-form">
+    <input type="text" id="inp-en" placeholder="English" autocomplete="off" />
+    <input type="text" id="inp-es" placeholder="Spanish" autocomplete="off" />
+    <button id="btn-add-word">Add</button>
+  </div>
+
+  <div class="word-bank-toolbar">
+    <button class="wb-btn" id="btn-import">↑ Import</button>
+    <button class="wb-btn" id="btn-export">↓ Export</button>
+    <button class="wb-btn danger" id="btn-clear-all">Clear all</button>
+  </div>
+
+  <div class="word-list" id="word-list"></div>
+
+</section>
+
+<!-- ── SETTINGS TAB ── -->
+<section id="tab-settings" class="tab-panel">
+
+  <div class="settings-section">
+    <h3>Playback</h3>
+    <div class="setting-row">
+      <label for="set-pause">Pause after English (ms)</label>
+      <input type="number" id="set-pause" class="setting-ctrl" value="1500" min="200" max="5000" step="100" style="width:90px" />
+    </div>
+    <div class="setting-row">
+      <label for="set-repeat">Repeat Spanish</label>
+      <input type="number" id="set-repeat" class="setting-ctrl" value="2" min="1" max="5" style="width:60px" />
+    </div>
+    <div class="setting-row">
+      <label for="set-loop">Loop playlist</label>
+      <input type="checkbox" id="set-loop" class="setting-ctrl" checked />
+    </div>
+    <div class="setting-row">
+      <label for="set-shuffle">Shuffle order</label>
+      <input type="checkbox" id="set-shuffle" class="setting-ctrl" />
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <h3>Voices</h3>
+    <div class="setting-row">
+      <label for="sel-en-voice">English voice</label>
+      <select id="sel-en-voice" class="setting-ctrl">
+        <option value="">Default</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <label for="sel-es-voice">Spanish voice</label>
+      <select id="sel-es-voice" class="setting-ctrl">
+        <option value="">Default</option>
+      </select>
+    </div>
+  </div>
+
+  <button class="wb-btn" id="btn-save-settings" style="width:100%;padding:14px;font-size:1rem">Save Settings</button>
+
+  <button class="install-btn" id="install-btn">Install App to Home Screen</button>
+
+  <div style="font-size:0.75rem;color:var(--text-muted);text-align:center;padding:8px 0">
+    Mi Vocabulario · Paul Noble method · PWA
+  </div>
+
+</section>
+
+<!-- ── IMPORT MODAL ── -->
+<div class="modal-overlay" id="import-modal">
+  <div class="modal">
+    <h2>Import Words</h2>
+    <p style="font-size:0.82rem;color:var(--text-muted)">
+      Paste tab-separated pairs, one per line:<br/>
+      <code>hello&nbsp;&nbsp;&nbsp;hola</code><br/>
+      <code>thank you&nbsp;&nbsp;&nbsp;gracias</code>
+    </p>
+    <textarea id="import-text" placeholder="english&#9;spanish&#10;english&#9;spanish"></textarea>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btn-import-close">Cancel</button>
+      <button class="btn-primary" id="btn-import-do">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── TOAST ── -->
+<div class="toast" id="toast"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>
