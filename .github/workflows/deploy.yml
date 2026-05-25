@@ -19,11 +19,45 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Pre-generate MP3 clips for the default word list.
+      # Files land in ./audio/ which is gitignored but included in the Pages artifact.
+      - name: Generate TTS audio clips
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: node generate-audio.js
+
+      # Replace the __OPENAI_API_KEY__ placeholder in app.js with the real secret.
+      # The key ends up in the deployed bundle (visible to anyone who reads the JS),
+      # but it is never committed to the git repository.
+      - name: Inject API key into app.js
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          node -e "
+            const fs  = require('fs');
+            const key = process.env.OPENAI_API_KEY || '';
+            let src   = fs.readFileSync('app.js', 'utf8');
+            if (!src.includes('__OPENAI_API_KEY__')) {
+              console.error('Placeholder not found in app.js');
+              process.exit(1);
+            }
+            fs.writeFileSync('app.js', src.replace('__OPENAI_API_KEY__', key));
+            console.log('Injected API key:', key ? 'yes (' + key.slice(0,8) + '…)' : 'EMPTY');
+          "
+
       - uses: actions/configure-pages@v5
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
+
       - id: deploy
         uses: actions/deploy-pages@v4

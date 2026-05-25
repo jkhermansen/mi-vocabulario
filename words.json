@@ -1,0 +1,12 @@
+[
+  {"en": "hello",     "es": "hola"},
+  {"en": "thank you", "es": "gracias"},
+  {"en": "please",    "es": "por favor"},
+  {"en": "goodbye",   "es": "adiós"},
+  {"en": "yes",       "es": "sí"},
+  {"en": "no",        "es": "no"},
+  {"en": "water",     "es": "agua"},
+  {"en": "food",      "es": "comida"},
+  {"en": "where is",  "es": "dónde está"},
+  {"en": "how much",  "es": "cuánto cuesta"}
+]
