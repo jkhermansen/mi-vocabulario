@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mi-vocabulario-v3';
+const CACHE_NAME = 'mi-vocabulario-v4';
 const TTS_CACHE  = 'mv-tts-v1';          // keep in sync with app.js
 
 const ASSETS = [
