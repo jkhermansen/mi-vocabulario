@@ -746,47 +746,84 @@ function closeImportModal() {
 
 function doImport() {
   const txt = document.getElementById('import-text').value.trim();
-  if (!txt) { closeImportModal(); return; }
+  console.log('[import] textarea length:', txt.length, '| first 80 chars:', JSON.stringify(txt.slice(0, 80)));
+
+  if (!txt) {
+    console.log('[import] empty textarea — closing modal');
+    closeImportModal();
+    return;
+  }
 
   let added = 0;
+  let skipped = 0;
 
   if (txt.startsWith('{')) {
     // ── JSON format ────────────────────────────────────────────────────────
     let data;
-    try { data = JSON.parse(txt); }
-    catch { toast('Invalid JSON — check the file and try again'); return; }
+    try {
+      data = JSON.parse(txt);
+      console.log('[import] JSON parsed OK — version:', data.version, '| words count:', Array.isArray(data.words) ? data.words.length : 'NOT AN ARRAY');
+    } catch (err) {
+      console.error('[import] JSON.parse failed:', err.message);
+      toast('Invalid JSON — check the file and try again');
+      return;
+    }
 
     if (data.version !== 1 || !Array.isArray(data.words)) {
+      console.warn('[import] format check failed — version:', data.version, '| isArray:', Array.isArray(data.words));
       toast('Unrecognised format — expected {version:1, words:[…]}');
       return;
     }
 
-    data.words.forEach(entry => {
-      const en   = String(entry.english ?? '').trim();
-      const es   = String(entry.spanish ?? '').trim();
+    data.words.forEach((entry, i) => {
+      const en   = String(entry.english != null ? entry.english : '').trim();
+      const es   = String(entry.spanish != null ? entry.spanish : '').trim();
       const type = entry.type === 'sentence' ? 'sentence' : undefined;
-      if (!en || !es) return;
-      if (words.find(w => w.en.toLowerCase() === en.toLowerCase())) return;
+      if (!en || !es) {
+        console.log(`[import] entry ${i} skipped — blank fields: en="${en}" es="${es}"`);
+        return;
+      }
+      if (words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
+        console.log(`[import] entry ${i} skipped — duplicate: "${en}"`);
+        skipped++;
+        return;
+      }
       words.push(type ? { en, es, type } : { en, es });
+      console.log(`[import] entry ${i} added: "${en}" → "${es}" (type: ${type || 'word'})`);
       added++;
     });
   } else {
     // ── TSV fallback ───────────────────────────────────────────────────────
-    txt.split('\n').forEach(line => {
+    console.log('[import] TSV path — lines:', txt.split('\n').length);
+    txt.split('\n').forEach((line, i) => {
       const parts = line.split('\t');
-      if (!parts[0] || !parts[1]) return;
+      if (!parts[0] || !parts[1]) {
+        console.log(`[import] TSV line ${i} skipped — not enough columns`);
+        return;
+      }
       const en   = parts[0].trim();
       const es   = parts[1].trim();
       const type = parts[2] && parts[2].trim().toLowerCase() === 'sentence' ? 'sentence' : undefined;
       if (en && es && !words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
         words.push(type ? { en, es, type } : { en, es });
+        console.log(`[import] TSV line ${i} added: "${en}" → "${es}"`);
         added++;
+      } else if (en && es) {
+        console.log(`[import] TSV line ${i} skipped — duplicate: "${en}"`);
+        skipped++;
       }
     });
   }
 
+  console.log(`[import] done — added: ${added}, skipped (duplicates): ${skipped}, word bank now: ${words.length}`);
   save(); renderWordList(); buildDeck(); closeImportModal();
-  toast(`Imported ${added} entr${added !== 1 ? 'ies' : 'y'}`);
+  if (added === 0 && skipped > 0) {
+    toast(`All ${skipped} entries already in word bank`);
+  } else if (added > 0 && skipped > 0) {
+    toast(`Imported ${added} new, skipped ${skipped} duplicates`);
+  } else {
+    toast(`Imported ${added} entr${added !== 1 ? 'ies' : 'y'}`);
+  }
   if (added) preloadAll();
 }
 
