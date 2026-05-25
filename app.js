@@ -34,11 +34,12 @@ let settings = {
 };
 
 let playerState = {
-  playing:    false,
-  index:      0,
-  phase:      'idle',  // idle | generating | english | pause | spanish | done
-  playOrder:  [],
-  generation: 0,       // increment on skip/stop so in-flight playWord exits early
+  playing:     false,
+  index:       0,
+  phase:       'idle',  // idle | generating | english | english-sent | pause | spanish | spanish-sent | done
+  playOrder:   [],
+  generation:  0,       // increment on skip/stop so in-flight playWord exits early
+  pairSentIdx: null,    // index of sentence entry in words[] while playing a pair; null otherwise
 };
 
 let flashState = {
@@ -324,6 +325,102 @@ async function playWord(wordObj, gen) {
   await delay(500);
 }
 
+async function playPair(word, sent, gen) {
+  const bail = () => playerState.generation !== gen || !playerState.playing;
+
+  loopSilence();
+
+  // ── 1. English word ──────────────────────────────────────────────────────
+  playerState.phase = 'generating';
+  updatePlayerUI();
+  showSpanish(false);
+  showSentenceSpanish(false);
+
+  let enWBlob = null;
+  try { enWBlob = await getOrGenerateAudio(word.en, 'en'); } catch (e) { toast(`TTS: ${e.message}`); }
+  if (bail()) return;
+
+  playerState.phase = 'english';
+  updatePlayerUI();
+  if (enWBlob) await playBlob(enWBlob);
+  if (bail()) return;
+
+  // ── 2. Pause ─────────────────────────────────────────────────────────────
+  playerState.phase = 'pause';
+  updatePlayerUI();
+  await delay(settings.pauseMs);
+  if (bail()) return;
+
+  // ── 3. Spanish word × N ──────────────────────────────────────────────────
+  playerState.phase = 'generating';
+  updatePlayerUI();
+  showSpanish(true);
+
+  let esWBlob = null;
+  try { esWBlob = await getOrGenerateAudio(word.es, 'es'); } catch (e) { toast(`TTS: ${e.message}`); }
+  if (bail()) return;
+
+  playerState.phase = 'spanish';
+  updatePlayerUI();
+
+  for (let i = 0; i < settings.repeatSpanish; i++) {
+    if (bail()) return;
+    if (esWBlob) await playBlob(esWBlob);
+    if (bail()) return;
+    if (i < settings.repeatSpanish - 1) { await delay(600); if (bail()) return; }
+  }
+  if (bail()) return;
+
+  // ── 4. Pause ─────────────────────────────────────────────────────────────
+  playerState.phase = 'pause';
+  updatePlayerUI();
+  await delay(settings.pauseMs);
+  if (bail()) return;
+
+  // ── 5. English sentence ───────────────────────────────────────────────────
+  playerState.phase = 'generating';
+  updatePlayerUI();
+
+  let enSBlob = null;
+  try { enSBlob = await getOrGenerateAudio(sent.en, 'en'); } catch (e) { toast(`TTS: ${e.message}`); }
+  if (bail()) return;
+
+  playerState.phase = 'english-sent';
+  updatePlayerUI();
+  if (enSBlob) await playBlob(enSBlob);
+  if (bail()) return;
+
+  // ── 6. Pause ─────────────────────────────────────────────────────────────
+  playerState.phase = 'pause';
+  updatePlayerUI();
+  await delay(settings.pauseMs);
+  if (bail()) return;
+
+  // ── 7. Spanish sentence × N ───────────────────────────────────────────────
+  playerState.phase = 'generating';
+  updatePlayerUI();
+  showSentenceSpanish(true);
+
+  let esSBlob = null;
+  try { esSBlob = await getOrGenerateAudio(sent.es, 'es'); } catch (e) { toast(`TTS: ${e.message}`); }
+  if (bail()) return;
+
+  playerState.phase = 'spanish-sent';
+  updatePlayerUI();
+
+  for (let i = 0; i < settings.repeatSpanish; i++) {
+    if (bail()) return;
+    if (esSBlob) await playBlob(esSBlob);
+    if (bail()) return;
+    if (i < settings.repeatSpanish - 1) { await delay(600); if (bail()) return; }
+  }
+
+  // ── 8. Pause before next pair ─────────────────────────────────────────────
+  playerState.phase = 'done';
+  updatePlayerUI();
+  await delay(500);
+}
+
 async function runPlayback() {
   if (!words.length) { stopPlayback(); return; }
 
@@ -336,28 +433,56 @@ async function runPlayback() {
     }
 
     const gen = playerState.generation;
-    highlightWord(idx);
-    updateMediaSessionMeta(words[idx]);
-    await playWord(words[idx], gen);
+
+    if (isPairAt(idx)) {
+      playerState.pairSentIdx = idx + 1;
+      highlightWord(idx);
+      updateMediaSessionMeta(words[idx]);
+      await playPair(words[idx], words[idx + 1], gen);
+    } else {
+      playerState.pairSentIdx = null;
+      highlightWord(idx);
+      updateMediaSessionMeta(words[idx]);
+      await playWord(words[idx], gen);
+    }
 
     if (!playerState.playing) break;
-    // Only auto-advance if a skip didn't already change the index
     if (playerState.generation === gen) playerState.index++;
   }
 }
 
+// ── Pair detection ─────────────────────────────────────────────────────────
+function isSentenceEntry(w)  { return w && w.type === 'sentence'; }
+function isPairAt(i)         { return i + 1 < words.length && !isSentenceEntry(words[i]) && isSentenceEntry(words[i + 1]); }
+
+// Return the position in playerState.playOrder whose group contains wordIdx.
+function groupPositionOf(wordIdx) {
+  for (let i = 0; i < playerState.playOrder.length; i++) {
+    const g = playerState.playOrder[i];
+    if (g === wordIdx || (isPairAt(g) && g + 1 === wordIdx)) return i;
+  }
+  return 0;
+}
+
 function buildPlayOrder() {
-  const order = words.map((_, i) => i);
+  // Each element is the group-start index in words[].
+  // Paired entries (word + sentence) share one slot so they always play together.
+  const order = [];
+  let i = 0;
+  while (i < words.length) {
+    order.push(i);
+    i += isPairAt(i) ? 2 : 1;
+  }
   if (settings.shufflePlayback) {
-    for (let i = order.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [order[i], order[j]] = [order[j], order[i]];
+    for (let j = order.length - 1; j > 0; j--) {
+      const k = Math.floor(Math.random() * (j + 1));
+      [order[j], order[k]] = [order[k], order[j]];
     }
   }
   playerState.playOrder = order;
 }
 
-function startPlayback(fromIndex = null) {
+function startPlayback(fromWordIdx = null) {
   if (!words.length) { toast('Add some words first!'); return; }
 
   playerState.generation++;
@@ -365,8 +490,9 @@ function startPlayback(fromIndex = null) {
   abortDelay();
 
   playerState.playing = true;
-  if (fromIndex !== null) playerState.index = fromIndex;
-  buildPlayOrder();
+  buildPlayOrder();  // must come before groupPositionOf()
+
+  if (fromWordIdx !== null) playerState.index = groupPositionOf(fromWordIdx);
 
   updatePlayPauseBtn();
   setupMediaSession();
@@ -376,8 +502,9 @@ function startPlayback(fromIndex = null) {
 
 function stopPlayback() {
   playerState.generation++;
-  playerState.playing = false;
-  playerState.phase   = 'idle';
+  playerState.playing    = false;
+  playerState.phase      = 'idle';
+  playerState.pairSentIdx = null;
   abortAudio();
   abortDelay();
   stopKeepAlive();
@@ -385,6 +512,7 @@ function stopPlayback() {
   updatePlayPauseBtn();
   updatePlayerUI();
   showSpanish(false);
+  showSentenceSpanish(false);
   highlightWord(-1);
 }
 
@@ -440,11 +568,21 @@ document.addEventListener('visibilitychange', () => {
 function updatePlayerUI() {
   const idx  = playerState.playOrder[playerState.index];
   const word = idx !== undefined ? words[idx] : null;
+  const sent = playerState.pairSentIdx !== null ? words[playerState.pairSentIdx] : null;
 
   document.getElementById('player-english').textContent = word ? word.en : '—';
   document.getElementById('player-spanish').textContent = word ? word.es : '—';
 
-  const total = words.length;
+  const pairWrap = document.getElementById('player-pair-wrap');
+  if (sent) {
+    document.getElementById('player-sent-en').textContent = sent.en;
+    document.getElementById('player-sent-es').textContent = sent.es;
+    pairWrap.classList.add('visible');
+  } else {
+    pairWrap.classList.remove('visible');
+  }
+
+  const total = playerState.playOrder.length;  // group count, not word count
   const pos   = playerState.index + 1;
   document.getElementById('progress-text').textContent =
     total ? `${Math.min(pos, total)} / ${total}` : '0 / 0';
@@ -452,9 +590,14 @@ function updatePlayerUI() {
     total ? `${(Math.min(pos, total) / total) * 100}%` : '0%';
 
   const labels = {
-    idle: '', generating: 'Generating audio…',
-    english: 'Speaking English…', pause: 'Pause…',
-    spanish: 'Speaking Spanish…', done: '',
+    idle:           '',
+    generating:     'Generating audio…',
+    english:        'Speaking English…',
+    'english-sent': 'Speaking English sentence…',
+    pause:          'Pause…',
+    spanish:        'Speaking Spanish…',
+    'spanish-sent': 'Speaking Spanish sentence…',
+    done:           '',
   };
   document.getElementById('phase-label').textContent = labels[playerState.phase] || '';
 }
@@ -463,13 +606,18 @@ function showSpanish(show) {
   document.getElementById('player-spanish').classList.toggle('visible', show);
 }
 
+function showSentenceSpanish(show) {
+  document.getElementById('player-sent-es').classList.toggle('visible', show);
+}
+
 function updatePlayPauseBtn() {
   document.getElementById('btn-play').textContent = playerState.playing ? '⏸' : '▶';
 }
 
 function highlightWord(idx) {
+  const sentIdx = playerState.pairSentIdx;
   document.querySelectorAll('.word-item').forEach((el, i) => {
-    el.classList.toggle('playing', i === idx);
+    el.classList.toggle('playing', i === idx || (sentIdx !== null && i === sentIdx));
   });
   if (idx >= 0) {
     const el = document.querySelectorAll('.word-item')[idx];
@@ -503,7 +651,7 @@ function renderWordList() {
     return;
   }
   list.innerHTML = words.map((w, i) => `
-    <div class="word-item" data-idx="${i}">
+    <div class="word-item${w.type === 'sentence' ? ' sentence' : ''}" data-idx="${i}">
       <div class="wi-text">
         <div class="wi-en">${escHtml(w.en)}</div>
         <div class="wi-es">${escHtml(w.es)}</div>
@@ -565,8 +713,9 @@ function fcAnswer(correct) {
 
 // ── Import / Export ────────────────────────────────────────────────────────
 function exportWords() {
-  const blob = new Blob([words.map(w => `${w.en}\t${w.es}`).join('\n')], { type: 'text/plain' });
-  const a    = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'vocabulario.txt' });
+  const lines = words.map(w => w.type ? `${w.en}\t${w.es}\t${w.type}` : `${w.en}\t${w.es}`);
+  const blob  = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const a     = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'vocabulario.txt' });
   a.click();
 }
 
@@ -586,11 +735,13 @@ function doImport() {
 
   let added = 0;
   txt.split('\n').forEach(line => {
-    const [rawEn, rawEs] = line.split('\t');
-    if (!rawEn || !rawEs) return;
-    const en = rawEn.trim(), es = rawEs.trim();
+    const parts = line.split('\t');
+    if (!parts[0] || !parts[1]) return;
+    const en   = parts[0].trim();
+    const es   = parts[1].trim();
+    const type = parts[2] && parts[2].trim().toLowerCase() === 'sentence' ? 'sentence' : undefined;
     if (en && es && !words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
-      words.push({ en, es });
+      words.push(type ? { en, es, type } : { en, es });
       added++;
     }
   });
