@@ -35,6 +35,11 @@
     <span class="label">English</span>
     <div class="english" id="player-english">—</div>
     <div class="spanish" id="player-spanish">—</div>
+    <div class="pair-wrap" id="player-pair-wrap">
+      <div class="pair-divider"></div>
+      <div class="sent-en" id="player-sent-en"></div>
+      <div class="sent-es" id="player-sent-es"></div>
+    </div>
   </div>
 
   <div class="phase-indicator" id="phase-label"></div>
@@ -133,18 +138,23 @@
   </div>
 
   <div class="settings-section">
-    <h3>Voices</h3>
+    <h3>Text-to-Speech (OpenAI)</h3>
     <div class="setting-row">
-      <label for="sel-en-voice">English voice</label>
-      <select id="sel-en-voice" class="setting-ctrl">
-        <option value="">Default</option>
-      </select>
+      <label>API key</label>
+      <span id="tts-key-status" class="setting-ctrl" style="font-size:0.82rem">—</span>
     </div>
     <div class="setting-row">
-      <label for="sel-es-voice">Spanish voice</label>
-      <select id="sel-es-voice" class="setting-ctrl">
-        <option value="">Default</option>
-      </select>
+      <label>Voices</label>
+      <span class="setting-ctrl" style="font-size:0.82rem;color:var(--text-muted)">alloy (EN) · nova (ES)</span>
+    </div>
+    <div class="setting-row">
+      <label>Cached clips</label>
+      <span id="tts-cache-count" class="setting-ctrl" style="font-size:0.82rem">—</span>
+    </div>
+    <div style="padding:8px 16px 12px">
+      <button class="wb-btn" id="btn-preload-all" style="width:100%;padding:12px">
+        Preload all audio clips
+      </button>
     </div>
   </div>
 
@@ -163,11 +173,15 @@
   <div class="modal">
     <h2>Import Words</h2>
     <p style="font-size:0.82rem;color:var(--text-muted)">
-      Paste tab-separated pairs, one per line:<br/>
-      <code>hello&nbsp;&nbsp;&nbsp;hola</code><br/>
-      <code>thank you&nbsp;&nbsp;&nbsp;gracias</code>
+      Choose a <code>.json</code> file (exported by this app) or paste text below.<br/>
+      TSV fallback: <code>english&nbsp;&nbsp;spanish</code> — add <code>sentence</code> as a third column for sentence entries.
     </p>
-    <textarea id="import-text" placeholder="english&#9;spanish&#10;english&#9;spanish"></textarea>
+    <div class="import-file-row">
+      <label class="import-file-btn" for="import-file">Choose file</label>
+      <input type="file" id="import-file" accept=".json,.txt" />
+      <span id="import-file-name"></span>
+    </div>
+    <textarea id="import-text" placeholder="Paste JSON or tab-separated pairs here…"></textarea>
     <div class="modal-actions">
       <button class="btn-cancel" id="btn-import-close">Cancel</button>
       <button class="btn-primary" id="btn-import-do">Import</button>

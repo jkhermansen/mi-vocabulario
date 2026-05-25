@@ -122,6 +122,42 @@ header h1 {
 
 .word-display .spanish.visible { opacity: 1; }
 
+/* ── Pair sentence section (shown only during paired-entry playback) ── */
+.pair-wrap {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.pair-wrap.visible { display: flex; }
+
+.pair-divider {
+  width: 40%;
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.word-display .sent-en {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  line-height: 1.3;
+  text-align: center;
+}
+
+.word-display .sent-es {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1.3;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+.word-display .sent-es.visible { opacity: 1; }
+
 .progress-info {
   display: flex;
   gap: 16px;
@@ -346,6 +382,11 @@ header h1 {
 .word-item:hover { background: var(--surface); }
 .word-item.playing { background: rgba(233,69,96,0.15); border-left: 3px solid var(--accent); }
 
+/* Sentence entries are indented and styled differently from word entries */
+.word-item.sentence { padding-left: 32px; background: rgba(255,255,255,0.01); }
+.word-item.sentence .wi-en { font-size: 0.88rem; font-style: italic; color: var(--text-muted); }
+.word-item.sentence .wi-es { font-size: 0.8rem; }
+
 .word-item .wi-text { flex: 1; }
 .word-item .wi-en { font-size: 0.95rem; font-weight: 600; }
 .word-item .wi-es { font-size: 0.85rem; color: var(--accent); }
@@ -488,6 +529,35 @@ header h1 {
   font-size: 0.85rem;
   font-family: monospace;
   resize: vertical;
+}
+
+.import-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-file-btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.import-file-btn:active { opacity: 0.8; }
+
+#import-file { display: none; }
+
+#import-file-name {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  word-break: break-all;
 }
 
 .modal-actions { display: flex; gap: 10px; }

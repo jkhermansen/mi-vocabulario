@@ -863,7 +863,7 @@ function init() {
 
   // Player controls
   document.getElementById('btn-play').addEventListener('click', () => {
-    if (playerState.playing) stopPlayback(); else startPlayback(playerState.index);
+    if (playerState.playing) stopPlayback(); else startPlayback();
   });
   document.getElementById('btn-prev').addEventListener('click', skipPrev);
   document.getElementById('btn-next').addEventListener('click', skipNext);
