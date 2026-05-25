@@ -713,20 +713,35 @@ function fcAnswer(correct) {
 
 // ── Import / Export ────────────────────────────────────────────────────────
 function exportWords() {
-  const lines = words.map(w => w.type ? `${w.en}\t${w.es}\t${w.type}` : `${w.en}\t${w.es}`);
-  const blob  = new Blob([lines.join('\n')], { type: 'text/plain' });
-  const a     = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'vocabulario.txt' });
+  const data = {
+    version: 1,
+    words: words.map((w, i) => ({
+      id:      i + 1,
+      type:    w.type === 'sentence' ? 'sentence' : 'word',
+      english: w.en,
+      spanish: w.es,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a    = Object.assign(document.createElement('a'), {
+    href:     URL.createObjectURL(blob),
+    download: 'vocabulario.json',
+  });
   a.click();
 }
 
 function showImportModal() {
   document.getElementById('import-modal').classList.add('open');
-  document.getElementById('import-text').value = '';
+  document.getElementById('import-text').value        = '';
+  document.getElementById('import-file').value        = '';
+  document.getElementById('import-file-name').textContent = '';
   document.getElementById('import-text').focus();
 }
 
 function closeImportModal() {
   document.getElementById('import-modal').classList.remove('open');
+  document.getElementById('import-file').value        = '';
+  document.getElementById('import-file-name').textContent = '';
 }
 
 function doImport() {
@@ -734,21 +749,44 @@ function doImport() {
   if (!txt) { closeImportModal(); return; }
 
   let added = 0;
-  txt.split('\n').forEach(line => {
-    const parts = line.split('\t');
-    if (!parts[0] || !parts[1]) return;
-    const en   = parts[0].trim();
-    const es   = parts[1].trim();
-    const type = parts[2] && parts[2].trim().toLowerCase() === 'sentence' ? 'sentence' : undefined;
-    if (en && es && !words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
+
+  if (txt.startsWith('{')) {
+    // ── JSON format ────────────────────────────────────────────────────────
+    let data;
+    try { data = JSON.parse(txt); }
+    catch { toast('Invalid JSON — check the file and try again'); return; }
+
+    if (data.version !== 1 || !Array.isArray(data.words)) {
+      toast('Unrecognised format — expected {version:1, words:[…]}');
+      return;
+    }
+
+    data.words.forEach(entry => {
+      const en   = String(entry.english ?? '').trim();
+      const es   = String(entry.spanish ?? '').trim();
+      const type = entry.type === 'sentence' ? 'sentence' : undefined;
+      if (!en || !es) return;
+      if (words.find(w => w.en.toLowerCase() === en.toLowerCase())) return;
       words.push(type ? { en, es, type } : { en, es });
       added++;
-    }
-  });
+    });
+  } else {
+    // ── TSV fallback ───────────────────────────────────────────────────────
+    txt.split('\n').forEach(line => {
+      const parts = line.split('\t');
+      if (!parts[0] || !parts[1]) return;
+      const en   = parts[0].trim();
+      const es   = parts[1].trim();
+      const type = parts[2] && parts[2].trim().toLowerCase() === 'sentence' ? 'sentence' : undefined;
+      if (en && es && !words.find(w => w.en.toLowerCase() === en.toLowerCase())) {
+        words.push(type ? { en, es, type } : { en, es });
+        added++;
+      }
+    });
+  }
 
   save(); renderWordList(); buildDeck(); closeImportModal();
-  toast(`Imported ${added} word${added !== 1 ? 's' : ''}`);
-  // Pre-cache new clips in the background
+  toast(`Imported ${added} entr${added !== 1 ? 'ies' : 'y'}`);
   if (added) preloadAll();
 }
 
@@ -889,6 +927,14 @@ function init() {
   document.getElementById('btn-import').addEventListener('click', showImportModal);
   document.getElementById('btn-import-close').addEventListener('click', closeImportModal);
   document.getElementById('btn-import-do').addEventListener('click', doImport);
+  document.getElementById('import-file').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('import-file-name').textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = ev => { document.getElementById('import-text').value = ev.target.result; };
+    reader.readAsText(file);
+  });
   document.getElementById('btn-clear-all').addEventListener('click', () => {
     if (confirm('Delete ALL words? This cannot be undone.')) {
       words = []; save(); renderWordList(); buildDeck(); stopPlayback(); toast('Word bank cleared');
