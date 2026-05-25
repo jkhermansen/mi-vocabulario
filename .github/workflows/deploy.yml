@@ -53,6 +53,16 @@ jobs:
             console.log('Injected API key:', key ? 'yes (' + key.slice(0,8) + '…)' : 'EMPTY');
           "
 
+      - name: Verify API key injection
+        run: |
+          node -e "
+            const src = require('fs').readFileSync('app.js', 'utf8');
+            const m   = src.match(/const OPENAI_API_KEY = '([^']*)'/);
+            const val = m ? m[1] : '(constant not found)';
+            console.log('Value first 20 chars : ' + JSON.stringify(val.slice(0, 20)));
+            console.log('Placeholder present  : ' + src.includes('__OPENAI_API_KEY__'));
+          "
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
