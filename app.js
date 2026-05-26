@@ -222,18 +222,27 @@ function abortDelay() {
 }
 
 // ── Background preloading ──────────────────────────────────────────────────
+async function preloadClip(text, lang) {
+  try {
+    await getOrGenerateAudio(text, lang);
+  } catch {
+    await new Promise(r => setTimeout(r, 5000));
+    await getOrGenerateAudio(text, lang);
+  }
+}
+
 async function preloadWord(wordObj) {
   await Promise.allSettled([
-    getOrGenerateAudio(wordObj.en, 'en'),
-    getOrGenerateAudio(wordObj.es, 'es'),
+    preloadClip(wordObj.en, 'en'),
+    preloadClip(wordObj.es, 'es'),
   ]);
 }
 
 async function preloadAll() {
   const list = [...words];
-  for (let i = 0; i < list.length; i += 3) {
-    await Promise.allSettled(list.slice(i, i + 3).map(preloadWord));
-    if (i + 3 < list.length) await new Promise(r => setTimeout(r, 500));
+  for (let i = 0; i < list.length; i += 2) {
+    await Promise.allSettled(list.slice(i, i + 2).map(preloadWord));
+    if (i + 2 < list.length) await new Promise(r => setTimeout(r, 2000));
   }
   updateTtsStatus();
 }
