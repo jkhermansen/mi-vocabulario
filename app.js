@@ -171,9 +171,12 @@ function abortAudio() {
 
 function playBlob(blob) {
   return new Promise(resolve => {
-    // Leaving silence mode: clear flag before touching the element.
+    // Leaving silence mode: pause first so the element is in a clean stopped
+    // state before src is swapped — without this, mobile WebKit can produce
+    // garbled audio because the looping WAV and new clip race each other.
     wordAudioSilent        = false;
     wordAudio.loop         = false;
+    wordAudio.pause();
     wordAudio.volume       = 1;
     playbackResolve        = resolve;
     const url = URL.createObjectURL(blob);
