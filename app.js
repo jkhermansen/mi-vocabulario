@@ -233,6 +233,7 @@ async function preloadAll() {
   const list = [...words];
   for (let i = 0; i < list.length; i += 3) {
     await Promise.allSettled(list.slice(i, i + 3).map(preloadWord));
+    if (i + 3 < list.length) await new Promise(r => setTimeout(r, 500));
   }
   updateTtsStatus();
 }
