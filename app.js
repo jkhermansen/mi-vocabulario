@@ -6,7 +6,7 @@
 const OPENAI_API_KEY = '__OPENAI_API_KEY__';
 const TTS_CACHE      = 'mv-tts-v1';
 const EN_VOICE       = 'alloy';
-const ES_VOICE       = 'nova';
+const ES_VOICE       = 'alloy';
 const TTS_MODEL      = 'tts-1-hd';
 
 // ── Default word list ──────────────────────────────────────────────────────

@@ -67,7 +67,7 @@ async function main() {
   const BATCH = 4;
   const tasks = WORDS.flatMap(w => [
     () => generateClip(w.en, 'en', 'alloy'),
-    () => generateClip(w.es, 'es', 'nova'),
+    () => generateClip(w.es, 'es', 'alloy'),
   ]);
 
   for (let i = 0; i < tasks.length; i += BATCH) {
